@@ -399,7 +399,7 @@ export function HealthRecordsPage({ onRecordAdded }: HealthRecordsPageProps = {}
               {t('records.upload')}
             </Button>
           </DialogTrigger>
-          <DialogContent className="sm:max-w-[425px]">
+          <DialogContent className="sm:max-w-[425px]" style={{ maxHeight: '80vh', overflowY: 'auto' }}>
             <DialogHeader>
               <DialogTitle>Add Health Record</DialogTitle>
               <DialogDescription>
