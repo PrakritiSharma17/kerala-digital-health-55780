@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -7,21 +7,53 @@ import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
-import { useLocalStorage } from '@/hooks/useLocalStorage';
 import { useAuth } from '@/contexts/AuthContext';
 import { useLanguage } from '@/contexts/LanguageContext';
-import { HealthRecord } from '@/types/health';
-import { FileText, Upload, Download, Calendar, User, Building, Plus, Search, Filter } from 'lucide-react';
+import { FileText, Upload, Download, Calendar, User, Building, Plus, Search, Filter, X, Eye } from 'lucide-react';
 import { format } from 'date-fns';
 import { toast } from '@/hooks/use-toast';
+import { supabase } from '@/integrations/supabase/client';
+import { AuthWrapper } from './AuthWrapper';
+
+type HealthRecord = {
+  id: string;
+  user_id: string;
+  type: 'checkup' | 'test' | 'immunization' | 'consultation' | 'emergency';
+  title: string;
+  description: string;
+  doctor_name: string;
+  hospital_name: string;
+  date: string;
+  next_follow_up?: string;
+  status: 'completed' | 'pending' | 'cancelled';
+  created_at: string;
+  updated_at: string;
+  files?: Array<{
+    id: string;
+    name: string;
+    file_type: string;
+    file_path: string;
+    file_size: number;
+  }>;
+  medications?: Array<{
+    id: string;
+    name: string;
+    dosage: string;
+    frequency: string;
+    duration: string;
+    instructions: string;
+  }>;
+};
 
 export function HealthRecordsPage() {
   const { user } = useAuth();
   const { t } = useLanguage();
-  const [records, setRecords] = useLocalStorage<HealthRecord[]>('health_records', []);
+  const [records, setRecords] = useState<HealthRecord[]>([]);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterType, setFilterType] = useState<string>('all');
+  const [loading, setLoading] = useState(false);
+  const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
   const [formData, setFormData] = useState({
     title: '',
     description: '',
@@ -31,7 +63,89 @@ export function HealthRecordsPage() {
     type: 'checkup' as HealthRecord['type']
   });
 
-  const handleUploadRecord = (e: React.FormEvent) => {
+  useEffect(() => {
+    if (user) {
+      fetchRecords();
+    }
+  }, [user]);
+
+  const fetchRecords = async () => {
+    if (!user) return;
+    
+    setLoading(true);
+    try {
+      const { data: records, error } = await supabase
+        .from('health_records')
+        .select(`
+          *,
+          health_record_files (
+            id,
+            name,
+            file_type,
+            file_path,
+            file_size
+          ),
+          health_record_medications (
+            id,
+            name,
+            dosage,
+            frequency,
+            duration,
+            instructions
+          )
+        `)
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      
+      setRecords(records.map(record => ({
+        ...record,
+        type: record.type as HealthRecord['type'],
+        status: record.status as HealthRecord['status'],
+        files: record.health_record_files || [],
+        medications: record.health_record_medications || []
+      })));
+    } catch (error) {
+      console.error('Error fetching records:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to load health records',
+        variant: 'destructive'
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const uploadFile = async (file: File, recordId: string) => {
+    const fileExt = file.name.split('.').pop();
+    const fileName = `${recordId}/${crypto.randomUUID()}.${fileExt}`;
+    const filePath = `${user!.id}/${fileName}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from('health-records')
+      .upload(filePath, file);
+
+    if (uploadError) throw uploadError;
+
+    const fileType = file.type.includes('image') ? 'image' : 
+                    file.type.includes('pdf') ? 'pdf' : 'doc';
+
+    const { error: dbError } = await supabase
+      .from('health_record_files')
+      .insert({
+        record_id: recordId,
+        name: file.name,
+        file_type: fileType,
+        file_path: filePath,
+        file_size: file.size
+      });
+
+    if (dbError) throw dbError;
+  };
+
+  const handleUploadRecord = async (e: React.FormEvent) => {
     e.preventDefault();
     
     if (!formData.title || !formData.doctorName || !formData.date) {
@@ -43,43 +157,113 @@ export function HealthRecordsPage() {
       return;
     }
 
-    const newRecord: HealthRecord = {
-      id: crypto.randomUUID(),
-      userId: user!.id,
-      title: formData.title,
-      description: formData.description,
-      doctorName: formData.doctorName,
-      hospitalName: formData.hospitalName,
-      date: formData.date,
-      type: formData.type,
-      files: [], // In a real app, you'd handle file uploads here
-      medications: [],
-      status: 'completed',
-      createdAt: new Date().toISOString()
-    };
+    if (!user) {
+      toast({
+        title: 'Error',
+        description: 'Please log in to add health records',
+        variant: 'destructive'
+      });
+      return;
+    }
 
-    setRecords(prev => [...prev, newRecord]);
-    setFormData({
-      title: '',
-      description: '',
-      doctorName: '',
-      hospitalName: '',
-      date: '',
-      type: 'checkup'
-    });
-    setIsUploadOpen(false);
-    
-    toast({
-      title: 'Success',
-      description: 'Health record added successfully!'
-    });
+    setLoading(true);
+    try {
+      // Insert health record
+      const { data: newRecord, error: recordError } = await supabase
+        .from('health_records')
+        .insert({
+          user_id: user.id,
+          title: formData.title,
+          description: formData.description,
+          doctor_name: formData.doctorName,
+          hospital_name: formData.hospitalName,
+          date: formData.date,
+          type: formData.type,
+          status: 'completed'
+        })
+        .select()
+        .single();
+
+      if (recordError) throw recordError;
+
+      // Upload files if any
+      if (uploadedFiles.length > 0) {
+        for (const file of uploadedFiles) {
+          await uploadFile(file, newRecord.id);
+        }
+      }
+
+      // Reset form
+      setFormData({
+        title: '',
+        description: '',
+        doctorName: '',
+        hospitalName: '',
+        date: '',
+        type: 'checkup'
+      });
+      setUploadedFiles([]);
+      setIsUploadOpen(false);
+      
+      // Refresh records
+      await fetchRecords();
+      
+      toast({
+        title: 'Success',
+        description: 'Health record added successfully!'
+      });
+    } catch (error) {
+      console.error('Error adding record:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to add health record',
+        variant: 'destructive'
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    setUploadedFiles(prev => [...prev, ...files]);
+  };
+
+  const removeFile = (index: number) => {
+    setUploadedFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const downloadFile = async (filePath: string, fileName: string) => {
+    try {
+      const { data, error } = await supabase.storage
+        .from('health-records')
+        .download(filePath);
+
+      if (error) throw error;
+
+      const url = URL.createObjectURL(data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Error downloading file:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to download file',
+        variant: 'destructive'
+      });
+    }
   };
 
   const filteredRecords = records
     .filter(record => {
       const matchesSearch = record.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                           record.doctorName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                           record.hospitalName.toLowerCase().includes(searchTerm.toLowerCase());
+                           record.doctor_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                           (record.hospital_name || '').toLowerCase().includes(searchTerm.toLowerCase());
       const matchesFilter = filterType === 'all' || record.type === filterType;
       return matchesSearch && matchesFilter;
     })
@@ -123,13 +307,13 @@ export function HealthRecordsPage() {
               <div className="space-y-1">
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <User className="h-3 w-3" />
-                  <span>{record.doctorName}</span>
+                  <span>{record.doctor_name}</span>
                 </div>
                 
-                {record.hospitalName && (
+                {record.hospital_name && (
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <Building className="h-3 w-3" />
-                    <span>{record.hospitalName}</span>
+                    <span>{record.hospital_name}</span>
                   </div>
                 )}
                 
@@ -139,12 +323,38 @@ export function HealthRecordsPage() {
                 </div>
               </div>
 
-              {record.medications.length > 0 && (
+              {record.files && record.files.length > 0 && (
+                <div className="mt-3">
+                  <h4 className="text-sm font-medium mb-2">Attached Files:</h4>
+                  <div className="space-y-1">
+                    {record.files.map((file) => (
+                      <div key={file.id} className="flex items-center justify-between p-2 bg-muted/50 rounded text-sm">
+                        <div className="flex items-center gap-2">
+                          <FileText className="h-3 w-3" />
+                          <span>{file.name}</span>
+                          <Badge variant="outline" className="text-xs">
+                            {file.file_type}
+                          </Badge>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => downloadFile(file.file_path, file.name)}
+                        >
+                          <Download className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {record.medications && record.medications.length > 0 && (
                 <div className="mt-3">
                   <h4 className="text-sm font-medium mb-1">Medications:</h4>
                   <div className="flex flex-wrap gap-1">
-                    {record.medications.map((med, index) => (
-                      <Badge key={index} variant="outline" className="text-xs">
+                    {record.medications.map((med) => (
+                      <Badge key={med.id} variant="outline" className="text-xs">
                         {med.name}
                       </Badge>
                     ))}
@@ -152,19 +362,12 @@ export function HealthRecordsPage() {
                 </div>
               )}
 
-              {record.nextFollowUp && (
+              {record.next_follow_up && (
                 <div className="mt-3 p-2 bg-accent/50 rounded text-sm">
                   <span className="font-medium">Next Follow-up: </span>
-                  {format(new Date(record.nextFollowUp), 'MMM dd, yyyy')}
+                  {format(new Date(record.next_follow_up), 'MMM dd, yyyy')}
                 </div>
               )}
-            </div>
-            
-            <div className="flex flex-col gap-2">
-              <Button size="sm" variant="outline">
-                <Download className="h-3 w-3 mr-1" />
-                Download
-              </Button>
             </div>
           </div>
         </CardContent>
@@ -173,7 +376,8 @@ export function HealthRecordsPage() {
   };
 
   return (
-    <div className="space-y-6">
+    <AuthWrapper>
+      <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">{t('records.title')}</h1>
@@ -266,15 +470,46 @@ export function HealthRecordsPage() {
                 <Label htmlFor="files">Upload Files</Label>
                 <div className="border-2 border-dashed border-border rounded-lg p-6 text-center">
                   <Upload className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
-                  <p className="text-sm text-muted-foreground">
+                  <p className="text-sm text-muted-foreground mb-2">
                     Drag and drop files here, or click to browse
                   </p>
-                  <Input type="file" multiple className="hidden" />
+                  <Input 
+                    type="file" 
+                    multiple 
+                    accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
+                    onChange={handleFileSelect}
+                    className="cursor-pointer"
+                  />
                 </div>
+                
+                {uploadedFiles.length > 0 && (
+                  <div className="space-y-2">
+                    <Label>Selected Files:</Label>
+                    {uploadedFiles.map((file, index) => (
+                      <div key={index} className="flex items-center justify-between p-2 bg-muted rounded">
+                        <div className="flex items-center gap-2">
+                          <FileText className="h-4 w-4" />
+                          <span className="text-sm">{file.name}</span>
+                          <Badge variant="outline" className="text-xs">
+                            {(file.size / 1024 / 1024).toFixed(2)} MB
+                          </Badge>
+                        </div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => removeFile(index)}
+                        >
+                          <X className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
-              <Button type="submit" className="w-full">
-                Add Record
+              <Button type="submit" className="w-full" disabled={loading}>
+                {loading ? 'Adding Record...' : 'Add Record'}
               </Button>
             </form>
           </DialogContent>
@@ -337,6 +572,7 @@ export function HealthRecordsPage() {
           ))}
         </div>
       )}
-    </div>
+      </div>
+    </AuthWrapper>
   );
 }
