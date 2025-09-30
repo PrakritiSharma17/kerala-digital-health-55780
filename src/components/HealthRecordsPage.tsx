@@ -45,7 +45,11 @@ type HealthRecord = {
   }>;
 };
 
-export function HealthRecordsPage() {
+interface HealthRecordsPageProps {
+  onRecordAdded?: () => void;
+}
+
+export function HealthRecordsPage({ onRecordAdded }: HealthRecordsPageProps = {}) {
   const { user } = useAuth();
   const { t } = useLanguage();
   const [records, setRecords] = useState<HealthRecord[]>([]);
@@ -208,9 +212,14 @@ export function HealthRecordsPage() {
       // Refresh records
       await fetchRecords();
       
+      // Notify parent component if callback provided
+      if (onRecordAdded) {
+        onRecordAdded();
+      }
+      
       toast({
         title: 'Success',
-        description: 'Health record added successfully!'
+        description: 'Health record added successfully! Dataset stored in database.'
       });
     } catch (error) {
       console.error('Error adding record:', error);
