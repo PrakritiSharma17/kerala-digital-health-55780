@@ -66,15 +66,38 @@ export function HealthRecordsPage({ onRecordAdded }: HealthRecordsPageProps = {}
     date: '',
     type: 'checkup' as HealthRecord['type']
   });
+  const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (user) {
+    let isMounted = true;
+
+    const init = async () => {
+      const { data } = await supabase.auth.getUser();
+      if (!isMounted) return;
+      setSupabaseUserId(data.user?.id ?? null);
+    };
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!isMounted) return;
+      setSupabaseUserId(session?.user?.id ?? null);
+    });
+
+    init();
+
+    return () => {
+      isMounted = false;
+      authListener?.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (supabaseUserId) {
       fetchRecords();
     }
-  }, [user]);
+  }, [supabaseUserId]);
 
   const fetchRecords = async () => {
-    if (!user) return;
+    if (!supabaseUserId) return;
     
     setLoading(true);
     try {
@@ -98,7 +121,7 @@ export function HealthRecordsPage({ onRecordAdded }: HealthRecordsPageProps = {}
             instructions
           )
         `)
-        .eq('user_id', user.id)
+        .eq('user_id', supabaseUserId as string)
         .order('created_at', { ascending: false });
 
       if (error) throw error;
@@ -123,9 +146,10 @@ export function HealthRecordsPage({ onRecordAdded }: HealthRecordsPageProps = {}
   };
 
   const uploadFile = async (file: File, recordId: string) => {
+    if (!supabaseUserId) throw new Error('Not authenticated');
     const fileExt = file.name.split('.').pop();
     const fileName = `${recordId}/${crypto.randomUUID()}.${fileExt}`;
-    const filePath = `${user!.id}/${fileName}`;
+    const filePath = `${supabaseUserId}/${fileName}`;
 
     const { error: uploadError } = await supabase.storage
       .from('health-records')
@@ -161,10 +185,10 @@ export function HealthRecordsPage({ onRecordAdded }: HealthRecordsPageProps = {}
       return;
     }
 
-    if (!user) {
+    if (!supabaseUserId) {
       toast({
-        title: 'Error',
-        description: 'Please log in to add health records',
+        title: 'Sign in required',
+        description: 'Please sign in to save health records securely.',
         variant: 'destructive'
       });
       return;
@@ -176,7 +200,7 @@ export function HealthRecordsPage({ onRecordAdded }: HealthRecordsPageProps = {}
       const { data: newRecord, error: recordError } = await supabase
         .from('health_records')
         .insert({
-          user_id: user.id,
+          user_id: supabaseUserId as string,
           title: formData.title,
           description: formData.description,
           doctor_name: formData.doctorName,
